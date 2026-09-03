@@ -2,10 +2,9 @@ import FinanceDataReader as fdr
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 print("1. 전체 상장 종목 리스트 불러오는 중...")
-# 1. 전체 종목 리스트 가져오기
 krx = fdr.StockListing("KRX")
 
 # 스팩, 우선주, ETF/ETN 제거
@@ -16,25 +15,34 @@ krx = krx[krx['Market'].isin(['KOSPI', 'KOSDAQ'])]
 if 'Sector' in krx.columns:
     krx = krx[~krx['Sector'].str.contains('금융|은행|증권|보험', na=False)]
 
-print(f"-> 대상 종목 수: {len(krx)}개")
+# 시가총액 순 정렬 후 상위 2000개 추출
+if 'Marcap' in krx.columns:
+    krx = krx.sort_values(by='Marcap', ascending=False).reset_index(drop=True)
 
-# 네이버 금융에서 PER, ROE 긁어오는 함수
-def get_naver_fundamental(code):
+target_krx = krx.head(2000).copy()
+print(f"-> 최종 분석 대상 종목 수: {len(target_krx)}개")
+
+# 개별 종목 크롤링 함수
+def fetch_fundamental(row_data):
+    code = row_data['Code']
     url = f"https://finance.naver.com/item/main.naver?code={code}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36'
     }
     
     try:
         res = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(res.text, 'html.parser')
         
-        # PER 가져오기
+        # 1. 현재 주가
+        price_elem = soup.select_one("p.no_today span.blind")
+        price = int(price_elem.text.replace(',', '')) if price_elem else None
+
+        # 2. PER
         per_elem = soup.select_one("#_per")
         per = float(per_elem.text.replace(',', '')) if per_elem and per_elem.text != 'N/A' else None
         
-        # ROE 가져오기 (주요재무제표 테이블의 ROE 위치 파악)
-        # 네이버 금융 우측 펀더멘털 영역의 ROE 파싱
+        # 3. ROE
         roe = None
         em_list = soup.select("div.section.trade_compare table tbody tr")
         for tr in em_list:
@@ -46,54 +54,44 @@ def get_naver_fundamental(code):
                         roe = float(val)
                 break
                 
-        return per, roe
+        return {'Code': code, 'Price': price, 'PER': per, 'ROE': roe}
     except Exception:
-        return None, None
+        return {'Code': code, 'Price': None, 'PER': None, 'ROE': None}
 
-print("\n2. 네이버 금융 기반 펀더멘털(PER, ROE) 데이터 크롤링 중...")
-print("(안정적인 처리를 위해 상위 300개 종목을 대상으로 1차 테스트를 진행합니다)")
+print("\n2. 네이버 금융 데이터(주가, PER, ROE) 멀티스레드 크롤링 중...")
+results = []
 
-# 테스트 및 속도를 위해 시가총액 상위 종목으로 우선 선별 (크롤링 시간 절약)
-if 'Marcap' in krx.columns:
-    krx = krx.sort_values(by='Marcap', ascending=False).reset_index(drop=True)
-
-# 일단 빠른 테스트를 위해 상위 300개로 진행 (나중에 숫자 늘릴 수 있음)
-target_krx = krx.head(300).copy()
-
-pers = []
-roes = []
-
-for idx, row in target_krx.iterrows():
-    code = row['Code']
-    name = row['Name']
+# 병렬 처리 (10개 스레드로 속도 향상)
+with ThreadPoolExecutor(max_workers=10) as executor:
+    futures = [executor.submit(fetch_fundamental, row) for _, row in target_krx.iterrows()]
     
-    per, roe = get_naver_fundamental(code)
-    pers.append(per)
-    roes.append(roe)
-    
-    # 50개마다 진행 상황 출력
-    if (idx + 1) % 50 == 0:
-        print(f"  - [{idx+1}/{len(target_krx)}] 종목 데이터 수집 완료...")
-    time.sleep(0.05) # 서버 매너 대기 시간
+    completed = 0
+    total = len(futures)
+    for future in as_completed(futures):
+        results.append(future.result())
+        completed += 1
+        if completed % 200 == 0 or completed == total:
+            print(f"  - [{completed}/{total}] 종목 수집 완료...")
 
-target_krx['PER'] = pers
-target_krx['ROE'] = roes
+# 결과 병합
+df_fetched = pd.DataFrame(results)
+target_krx = pd.merge(target_krx, df_fetched, on='Code', how='inner')
 
-# 데이터 정제 (PER, ROE가 유효하고 PER > 0 인 적자 제외 기업만)
-df_valid = target_krx.dropna(subset=['PER', 'ROE']).copy()
+# 데이터 정제 (유효 데이터 & 적자 제외)
+df_valid = target_krx.dropna(subset=['PER', 'ROE', 'Price']).copy()
 df_valid = df_valid[df_valid['PER'] > 0]
 
-print(f"\n-> 유효 종목 수: {len(df_valid)}개")
+print(f"\n-> 적자 기업 및 유효 지표 미제공 기업 제외 후 유효 종목 수: {len(df_valid)}개")
 
 # 3. 마법공식 순위 계산
-df_valid['PER_Rank'] = df_valid['PER'].rank(ascending=True)      # PER 낮을수록 1위
-df_valid['ROE_Rank'] = df_valid['ROE'].rank(ascending=False)     # ROE 높을수록 1위
+df_valid['PER_Rank'] = df_valid['PER'].rank(ascending=True)
+df_valid['ROE_Rank'] = df_valid['ROE'].rank(ascending=False)
 df_valid['Magic_Score'] = df_valid['PER_Rank'] + df_valid['ROE_Rank']
 
-# 정렬 후 저장
+# 정렬 후 CSV 저장
 df_result = df_valid.sort_values(by='Magic_Score').reset_index(drop=True)
 df_result.to_csv("magic_formula_top.csv", index=False, encoding="utf-8-sig")
 
-print("\n=== 🧙‍♂️ 마법공식 상위 TOP 10 ===")
-print(df_result[['Name', 'Code', 'Market', 'PER', 'ROE', 'Magic_Score']].head(10))
+print("\n=== 🧙‍♂️ 마법공식 TOP 10 ===")
+print(df_result[['Name', 'Code', 'Market', 'Price', 'PER', 'ROE', 'Magic_Score']].head(10))
 print("\n-> 'magic_formula_top.csv' 저장 완료!")
