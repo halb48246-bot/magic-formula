@@ -33,7 +33,6 @@ def fetch_fundamental(row_data):
         'Referer': 'https://finance.naver.com/'
     }
     
-    # 서버 차단 방지 지연시간
     time.sleep(random.uniform(0.05, 0.15))
     
     for attempt in range(2):
@@ -50,21 +49,26 @@ def fetch_fundamental(row_data):
                 per_elem = soup.select_one("#_per")
                 per = float(per_elem.text.replace(',', '')) if per_elem and per_elem.text != 'N/A' else None
                 
-                # 3. 최신 확정 ROE (추정치 E 제거)
+                # 3. 최신 확정 ROE (개별 종목 기업실적분석 cop_analysis 테이블에서 수집)
                 roe = None
-                em_list = soup.select("div.section.trade_compare table tbody tr")
-                for tr in em_list:
-                    if "ROE" in tr.text:
-                        tds = tr.select("td")
-                        for td in reversed(tds):
-                            val = td.text.strip().replace(',', '')
-                            if val and val != 'N/A' and '(E)' not in val:
-                                try:
-                                    roe = float(val)
-                                    break
-                                except ValueError:
-                                    continue
-                        break
+                finance_table = soup.select_one("div.section.cop_analysis table")
+                
+                if finance_table:
+                    rows = finance_table.select("tbody tr")
+                    for tr in rows:
+                        th = tr.select_one("th")
+                        if th and "ROE" in th.text:
+                            tds = tr.select("td")
+                            # 오른쪽(최신 실적)부터 역순 탐색하며 확정 숫자를 파싱
+                            for td in reversed(tds):
+                                val = td.text.strip().replace(',', '')
+                                if val and val != 'N/A' and '(E)' not in val:
+                                    try:
+                                        roe = float(val)
+                                        break
+                                    except ValueError:
+                                        continue
+                            break
                         
                 return {'Code': code, 'Price': price, 'PER': per, 'ROE': roe}
         except Exception:
@@ -75,7 +79,6 @@ def fetch_fundamental(row_data):
 print("\n2. 크롤링 진행 중 (네이버 금융)...")
 results = []
 
-# 차단 방지를 위해 스레드 수를 4개로 조정
 with ThreadPoolExecutor(max_workers=4) as executor:
     futures = [executor.submit(fetch_fundamental, row) for _, row in target_krx.iterrows()]
     

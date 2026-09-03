@@ -47,11 +47,20 @@ else:
     
     st.subheader(f"📊 마법공식 TOP {top_n} 리스트")
     
-    display_df = filtered_df[['Magic_Score', 'Name', 'Code', 'Market', 'PER', 'ROE', 'PER_Rank', 'ROE_Rank', 'Price']].copy()
-    display_df.columns = ['순위 스코어', '종목명', '종목코드', '시장', 'PER', 'ROE', 'PER순위', 'ROE순위', '현재주가']
-    
-    # 주가 포맷팅 (원화 콤마 추가)
-    display_df['현재주가'] = display_df['현재주가'].apply(lambda x: f"{int(x):,}원" if pd.notnull(x) else "-")
+    cols_to_use = ['Magic_Score', 'Name', 'Code', 'Market', 'PER', 'ROE', 'PER_Rank', 'ROE_Rank']
+    col_names = ['순위 스코어', '종목명', '종목코드', '시장', 'PER', 'ROE', 'PER순위', 'ROE순위']
+
+    if 'Price' in filtered_df.columns:
+        cols_to_use.append('Price')
+        col_names.append('현재주가')
+
+    display_df = filtered_df[cols_to_use].copy()
+    display_df.columns = col_names
+
+    if '현재주가' in display_df.columns:
+        display_df['현재주가'] = display_df['현재주가'].apply(
+            lambda x: f"{int(x):,}원" if pd.notnull(x) and str(x).replace('.','').isdigit() else "-"
+        )
     
     st.dataframe(
         display_df,
